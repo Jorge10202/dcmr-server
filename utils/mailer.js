@@ -18,70 +18,90 @@ export async function sendMail({ to, subject, text, html, attachments = [] }) {
 }*/
 
 // server/utils/mailer.js
+// En producción (Render): usaremos Brevo por API (HTTPS, sin puertos SMTP).
+// En local (si quieres), puedes seguir usando Nodemailer con Gmail.
+
 import nodemailer from 'nodemailer';
 
-function buildTransport(port) {
-  const secure = port === 465; // 465 = SSL directo, 587 = STARTTLS
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
-    port,
-    secure,
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS, // App Password (16 caracteres)
-    },
-    // Evita colgues largos
-    connectionTimeout: 20000,
-    greetingTimeout: 15000,
-    socketTimeout: 30000,
-    // Forzar IPv4 (a veces el AAAA de Gmail hace timeout desde PaaS)
-    dnsResolvePrefer: 'ipv4',
-    requireTLS: !secure,               // solo aplica para 587
-    tls: { minVersion: 'TLSv1.2' },
-    pool: true,
-  });
-}
+// --- ENV ---
+const PROVIDER = process.env.EMAIL_PROVIDER || 'nodemailer'; // 'brevo' en Render
+const FROM = process.env.MAIL_FROM || `"DCMR Mueblería" <${process.env.SMTP_USER || 'no-reply@dcmr.com'}>`;
 
-const t465 = buildTransport(465);
-const t587 = buildTransport(587);
+// ---------- ENVÍO POR API (BREVO) ----------
+async function sendViaBrevo({ to, subject, text, html, attachments = [] }) {
+  const url = 'https://api.brevo.com/v3/smtp/email';
 
-function isConnErr(e) {
-  const m = String(e?.message || '').toLowerCase();
-  return (
-    m.includes('timeout') ||
-    m.includes('econn') ||                // ECONNRESET / ECONNREFUSED / ECONNECTION
-    m.includes('must issue a starttls')
-  );
-}
-
-export async function sendMail({ to, subject, text, html, attachments = [] }) {
-  const from = process.env.MAIL_FROM || `"DCMR Mueblería" <${process.env.SMTP_USER}>`;
-
-  // 1) Intentar 465 (SSL directo)
-  try {
-    await t465.verify();
-    console.log('[SMTP] usando 465');
-    return await t465.sendMail({ from, to, subject, text, html, attachments });
-  } catch (e) {
-    console.error('[SMTP 465]', e?.code || '', e?.message || e);
-    if (!isConnErr(e)) throw e;
-  }
-
-  // 2) Fallback a 587 (STARTTLS)
-  await t587.verify();
-  console.log('[SMTP] fallback a 587');
-  return t587.sendMail({ from, to, subject, text, html, attachments });
-}
-
-export async function mailHealth() {
-  try {
-    await t465.verify();
-    return { ok: true, port: 465 };
-  } catch (e1) {
-    if (isConnErr(e1)) {
-      await t587.verify();
-      return { ok: true, port: 587, fallback: true };
+  // Brevo pide attachments en base64
+  const mappedAttachments = (attachments || []).map(a => {
+    let contentBase64 = '';
+    if (a?.content) {
+      contentBase64 = Buffer.isBuffer(a.content)
+        ? a.content.toString('base64')
+        : Buffer.from(String(a.content)).toString('base64');
     }
-    throw e1;
+    return {
+      name: a?.filename || a?.name || 'adjunto',
+      content: contentBase64
+    };
+  });
+
+  const body = {
+    sender: {
+      name: FROM.split('<')[0].replace(/"/g, '').trim(),
+      email: (FROM.match(/<(.+?)>/) || [])[1] || FROM
+    },
+    to: [{ email: to }],
+    subject,
+    htmlContent: html || undefined,
+    textContent: text || undefined,
+    attachment: mappedAttachments.length ? mappedAttachments : undefined
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'api-key': process.env.BREVO_API_KEY,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Brevo ${res.status}: ${errText}`);
   }
+  return true;
+}
+
+// ---------- ENVÍO LOCAL POR SMTP (opcional) ----------
+const smtpTransporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || 'smtp.gmail.com',
+  port: Number(process.env.SMTP_PORT) || 587,
+  secure: Number(process.env.SMTP_PORT) === 465, // 465 SSL, 587 STARTTLS
+  auth: process.env.SMTP_USER && process.env.SMTP_PASS ? {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS
+  } : undefined,
+  requireTLS: Number(process.env.SMTP_PORT) !== 465,
+  tls: { minVersion: 'TLSv1.2' },
+  pool: true
+});
+
+async function sendViaSMTP({ to, subject, text, html, attachments = [] }) {
+  return smtpTransporter.sendMail({ from: FROM, to, subject, text, html, attachments });
+}
+
+// ---------- API PÚBLICA (misma firma que ya usas) ----------
+export async function sendMail(opts) {
+  if (PROVIDER === 'brevo') {
+    return sendViaBrevo(opts);
+  }
+  return sendViaSMTP(opts);
+}
+
+// (opcional) endpoint de salud
+export async function mailHealth() {
+  if (PROVIDER === 'brevo') return { ok: true, provider: 'brevo' };
+  await smtpTransporter.verify();
+  return { ok: true, provider: 'smtp' };
 }
