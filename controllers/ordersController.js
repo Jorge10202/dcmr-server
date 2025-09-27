@@ -84,10 +84,10 @@ export const checkout = async (req, res) => {
 
         await sendMail({
           to: full.user.correo,
-          subject: `Comprobante de compra #${full.order.id} - DCMR`,
-          text: `Hola ${full.user.nombre}, adjuntamos el comprobante de tu compra #${full.order.id}. ¡Gracias por comprar en DCMR!`,
+          subject: `Comprobante de compra - DCMR`,
+          text: `Hola ${full.user.nombre}, adjuntamos el comprobante de tu compra. ¡Gracias por comprar en DCMR!`,
           attachments: [
-            { filename: `DCMR-Orden-${full.order.id}.pdf`, content: pdfBuf }
+            { filename: `DCMR-Orden.pdf`, content: pdfBuf }
           ]
         });
       }
