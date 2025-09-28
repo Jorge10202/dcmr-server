@@ -31,54 +31,59 @@ export const getCart = async (req, res) => {
 
 export const addItem = async (req, res) => {
   try {
-    const { productId, quantity, priceSnapshot } = req.body;
+    const { productId, quantity } = req.body;
     if (!productId || !quantity) return res.status(400).json({ error: 'Datos inválidos' });
+
     const cart = await ensureOpenCart(req.user.id);
 
+    // Traemos también los campos de promo
     const [[product]] = await pool.query(
       'SELECT id, precio, stock, descuento_pct, promo_inicio, promo_fin FROM productos WHERE id=?',
       [productId]
     );
     if (!product) return res.status(404).json({ error: 'Producto no encontrado' });
 
+    // métrica "agregado al carrito"
     await pool.query(
       'INSERT INTO product_stats (product_id, views, added_to_cart) VALUES (?,0,1) ON DUPLICATE KEY UPDATE added_to_cart = added_to_cart + 1',
       [productId]
     );
 
-    const [[existing]] = await pool.query('SELECT * FROM cart_items WHERE cart_id=? AND product_id=?', [cart.id, productId]);
+    // Precio final (si hay promo activa, usar descuento)
+    const now = new Date();
+    const pct = Number(product.descuento_pct || 0);
+    const startOk = !product.promo_inicio || new Date(product.promo_inicio) <= now;
+    const endOk   = !product.promo_fin    || new Date(product.promo_fin)    >= now;
+    const promoActiva = pct > 0 && startOk && endOk;
+    const unitPrice = promoActiva
+      ? Number((Number(product.precio) * (1 - pct/100)).toFixed(2))
+      : Number(product.precio);
+
+    // si ya existe el item, sumar cantidad (conservamos el snapshot previo)
+    const [[existing]] = await pool.query(
+      'SELECT * FROM cart_items WHERE cart_id=? AND product_id=?',
+      [cart.id, productId]
+    );
     if (existing) {
       const newQty = existing.quantity + quantity;
       if (newQty > product.stock) return res.status(400).json({ error: 'Stock insuficiente' });
-
-      let unitPrice;
-      if (priceSnapshot !== undefined && priceSnapshot !== null && priceSnapshot !== '') {
-        const n = Number(priceSnapshot);
-        unitPrice = Number.isFinite(n) ? +n.toFixed(2) : computeDiscountedPrice(product);
-      } else {
-        unitPrice = computeDiscountedPrice(product);
-      }
-      await pool.query('UPDATE cart_items SET quantity=?, price_snapshot=? WHERE id=?', [newQty, unitPrice, existing.id]);
-
+      await pool.query('UPDATE cart_items SET quantity=? WHERE id=?', [newQty, existing.id]);
       return res.json({ ok: true });
     }
 
     if (quantity > product.stock) return res.status(400).json({ error: 'Stock insuficiente' });
 
-    let unitPrice;
-    if (priceSnapshot !== undefined && priceSnapshot !== null && priceSnapshot !== '') {
-      const n = Number(priceSnapshot);
-      unitPrice = Number.isFinite(n) ? +n.toFixed(2) : computeDiscountedPrice(product);
-    } else {
-      unitPrice = computeDiscountedPrice(product);
-    }
-
+    // Guardamos snapshot con el precio final calculado
     await pool.query(
       'INSERT INTO cart_items (cart_id, product_id, quantity, price_snapshot) VALUES (?,?,?,?)',
       [cart.id, productId, quantity, unitPrice]
     );
+
     res.json({ ok: true });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Error agregando al carrito' }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Error agregando al carrito' });
+  }
 };
 
 export const updateItem = async (req, res) => {
