@@ -36,20 +36,17 @@ export const addItem = async (req, res) => {
 
     const cart = await ensureOpenCart(req.user.id);
 
-    // Traemos también los campos de promo
     const [[product]] = await pool.query(
       'SELECT id, precio, stock, descuento_pct, promo_inicio, promo_fin FROM productos WHERE id=?',
       [productId]
     );
     if (!product) return res.status(404).json({ error: 'Producto no encontrado' });
 
-    // métrica "agregado al carrito"
     await pool.query(
       'INSERT INTO product_stats (product_id, views, added_to_cart) VALUES (?,0,1) ON DUPLICATE KEY UPDATE added_to_cart = added_to_cart + 1',
       [productId]
     );
 
-    // Precio final (si hay promo activa, usar descuento)
     const now = new Date();
     const pct = Number(product.descuento_pct || 0);
     const startOk = !product.promo_inicio || new Date(product.promo_inicio) <= now;
@@ -59,7 +56,6 @@ export const addItem = async (req, res) => {
       ? Number((Number(product.precio) * (1 - pct/100)).toFixed(2))
       : Number(product.precio);
 
-    // si ya existe el item, sumar cantidad (conservamos el snapshot previo)
     const [[existing]] = await pool.query(
       'SELECT * FROM cart_items WHERE cart_id=? AND product_id=?',
       [cart.id, productId]
@@ -73,7 +69,6 @@ export const addItem = async (req, res) => {
 
     if (quantity > product.stock) return res.status(400).json({ error: 'Stock insuficiente' });
 
-    // Guardamos snapshot con el precio final calculado
     await pool.query(
       'INSERT INTO cart_items (cart_id, product_id, quantity, price_snapshot) VALUES (?,?,?,?)',
       [cart.id, productId, quantity, unitPrice]
